@@ -1,0 +1,121 @@
+@startuml
+title Detailed Sequence Diagram for Agentic Approach
+
+actor "User" as user
+
+participant "main" as main
+participant "controller.main_controller" as controller.main_controller
+participant "services.pydantic_models" as services.pydantic_models
+participant "services.setup_service" as services.setup_service
+participant "services.scraper_service" as services.scraper_service
+participant "services.link_service" as services.link_service
+participant "services.validation_service" as services.validation_service
+participant "helper.connect_llm" as helper.connect_llm
+participant "repository.data_repository" as repository.data_repository
+
+== Stage 1: Input & Validation ==
+user -> main: Launch application (python main.py)
+main -> controller.main_controller: handle_scraping_request(user_input)
+
+note right of controller.main_controller
+  1. Parse CLI or function arguments
+  2. Prepare to validate input
+end note
+
+controller.main_controller -> services.validation_service: validate_input(user_input)
+services.validation_service -> services.pydantic_models: Use InputSchema to validate
+
+alt Input Invalid
+    services.validation_service -> controller.main_controller: raise ValidationError
+    controller.main_controller -> main: Return error & terminate
+    return
+end
+
+controller.main_controller -> controller.main_controller: set valid parameters
+
+== Stage 2: Setup Environment ==
+controller.main_controller -> services.setup_service: initialize_parameters()
+note right of services.setup_service
+  - Create visited set
+  - Initialize queue
+  - Set scraping limits
+  - Prepare final result storage
+end note
+
+services.setup_service -> services.pydantic_models: import OutputSchema definitions
+services.setup_service -> repository.data_repository: initialize_storage_structures()
+
+== Stage 3: Primary Scraping Loop ==
+controller.main_controller -> services.scraper_service: scrape_url(base_url)
+loop While there are URLs in Queue
+    services.scraper_service -> services.scraper_service: attempt_http_request(url)
+    alt HTTP response not OK
+        services.scraper_service -> controller.main_controller: Log error/ Skip or Retry
+        controller.main_controller -> services.scraper_service: proceed_to_next_url_in_queue()
+    end
+
+    services.scraper_service -> services.scraper_service: clean_markdown(content)
+    services.scraper_service -> services.scraper_service: extract_main_content(cleaned_content)
+
+    services.scraper_service -> helper.connect_llm: invoke_llm(system_prompt, user_prompt)
+    note right of helper.connect_llm
+      This is where LLM checks content
+      against user requirements
+    end note
+
+    helper.connect_llm -> services.scraper_service: return LLM evaluation result
+    alt Content meets requirements
+        services.scraper_service -> services.validation_service: transform_and_validate(content)
+        services.validation_service -> services.pydantic_models: validate Output using OutputSchema
+        alt Validation succeeds
+            services.validation_service -> repository.data_repository: store_valid_result(content)
+        else Validation fails
+            services.validation_service -> services.scraper_service: discard_or_retransform(content)
+        end
+    else Content not relevant
+        services.scraper_service -> services.scraper_service: discard/ignore content
+    end
+
+    == Stage 4: Link Extraction & Filtering ==
+    services.scraper_service -> services.link_service: extract_links_from_page(content)
+    services.link_service -> helper.connect_llm: invoke_llm(system_prompt, link_extraction_prompt)
+    helper.connect_llm -> services.link_service: strictly_related_links
+
+    alt No valid links found
+        services.link_service -> services.scraper_service: no_links_to_enqueue
+    else Valid links found
+        services.link_service -> services.link_service: filter & sort links
+        services.link_service -> services.scraper_service: return_filtered_links
+    end
+
+    == Stage 5: Link Verification & Deduplication ==
+    services.scraper_service -> repository.data_repository: check_if_visited(link)
+    alt Already visited
+        services.scraper_service -> services.scraper_service: skip_link
+    else Not visited
+        services.scraper_service -> repository.data_repository: add_to_visited(link)
+        services.scraper_service -> controller.main_controller: enqueue_link_for_scraping(link)
+    end
+
+    == Stage 6: Iteration & Limit Checks ==
+    controller.main_controller -> services.setup_service: check_scraping_limit(current_count)
+    alt limit exceeded
+        controller.main_controller -> controller.main_controller: terminate_loop
+        
+    else continue scraping
+    end
+
+end
+
+== Stage 7: Finalization & Output ==
+controller.main_controller -> repository.data_repository: assemble_final_results()
+repository.data_repository -> services.validation_service: final_output_validation(results)
+services.validation_service -> services.pydantic_models: validate final output
+alt Validation failure
+    services.validation_service -> services.validation_service: attempt re-transformation
+end
+services.validation_service -> controller.main_controller: validated_final_output
+
+controller.main_controller -> main: return final JSON output
+
+@enduml
